@@ -5,7 +5,7 @@
 #ifndef IMAGECONVOLUTION_INPUTEXCEPTION_H
 #define IMAGECONVOLUTION_INPUTEXCEPTION_H
 
-#include "../../../../../../usr/include/c++/10/string"
+#include <string>
 
 class InputException
 {

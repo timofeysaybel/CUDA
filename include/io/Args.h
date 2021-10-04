@@ -5,9 +5,8 @@
 #ifndef IMAGECONVOLUTION_ARGS_H
 #define IMAGECONVOLUTION_ARGS_H
 
-#include "../../../../../../usr/include/c++/10/string"
-#include "../../../../../../usr/include/c++/10/vector"
-#include "../../../../../../usr/include/c++/10/fstream"
+#include <string>
+#include <vector>
 
 class Args
 {
