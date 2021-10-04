@@ -1,5 +1,5 @@
 //
-// Created by timofey on 03.10.2021.
+// Created by timofey
 //
 #include "../../include/io/Writer.h"
 

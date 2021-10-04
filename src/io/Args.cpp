@@ -1,5 +1,5 @@
 //
-// Created by timofey on 02.10.2021.
+// Created by timofey
 //
 #include "../../include/io/Args.h"
 #include "../../include/io/InputException.h"

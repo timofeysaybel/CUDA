@@ -1,5 +1,5 @@
 //
-// Created by timofey on 02.10.2021.
+// Created by timofey
 //
 
 #ifndef IMAGECONVOLUTION_FILTERS_H
@@ -22,16 +22,16 @@ namespace Filters
 
     const double edgeKernel[] =
             {
-            -1 / 8., -1 / 8., -1 / 8.,
-            -1 / 8., 1., -1 / 8.,
-            -1 / 8., -1 / 8., -1 / 8.,
+            0, -1, 0,
+            -1, 4, -1,
+            0, -1, 0,
             };
 
     const double sharpenKernel[] =
             {
-            0, -1, 0,
-            -1, 5, -1,
-            0, -1, 0
+            -1, -1, -1,
+            -1, 9, -1,
+            -1, -1, -1
             };
 }
 

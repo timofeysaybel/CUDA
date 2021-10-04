@@ -1,5 +1,5 @@
 //
-// Created by timofey on 02.10.2021.
+// Created by timofey
 //
 #include <string>
 #include <utility>

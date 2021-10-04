@@ -1,5 +1,5 @@
 //
-// Created by timofey on 03.10.2021.
+// Created by timofey
 //
 
 #include "../../include/filters/Solver.cuh"
@@ -9,42 +9,75 @@
 
 #include <iostream>
 
+#define SAFE_CALL(CallInstruction) { \
+    cudaError_t cuerr = CallInstruction; \
+    if(cuerr != cudaSuccess) { \
+         printf("CUDA error: %s at call \"" #CallInstruction "\"\n", cudaGetErrorString(cuerr)); \
+         throw "error in CUDA API function, aborting..."; \
+    } \
+}
+
+#define SAFE_KERNEL_CALL(KernelCallInstruction){ \
+    KernelCallInstruction; \
+    cudaError_t cuerr = cudaGetLastError(); \
+    if(cuerr != cudaSuccess) { \
+        printf("CUDA error in kernel launch: %s at kernel \"" #KernelCallInstruction "\"\n", cudaGetErrorString(cuerr)); \
+        throw "error in CUDA kernel launch, aborting..."; \
+    } \
+    cuerr = cudaDeviceSynchronize(); \
+    if(cuerr != cudaSuccess) { \
+        printf("CUDA error in kernel execution: %s at kernel \"" #KernelCallInstruction "\"\n", cudaGetErrorString(cuerr)); \
+        throw "error in CUDA kernel execution, aborting..."; \
+    } \
+}
+
 using namespace std;
 
 __global__
-void applyFilter(Pixel *image, Pixel *filtered, const double* kernel, int kernelCenter, int width, int height)
+void applyFilter(Pixel *image, Pixel *filtered, const double *kernel, int kernelCenter, int width, int height)
 {
-    unsigned x = blockDim.x * blockIdx.x + threadIdx.x;
-    unsigned int y = blockDim.y * blockIdx.y + threadIdx.y;
+    int x = blockDim.x * blockIdx.x + threadIdx.x;
+    int y = blockDim.y * blockIdx.y + threadIdx.y;
 
-    if (x < width && y < height)
+    if (x >= width || y >= height)
+        return;
+
+    double r = 0., g = 0., b = 0.;
+
+    for (int i = -kernelCenter; i <= kernelCenter; i++)
     {
-        double r = 0., g = 0., b = 0.;
-
-        for (int i = -kernelCenter; i <= kernelCenter; i++)
+        for (int j = -kernelCenter; j <= kernelCenter; j++)
         {
-            for (int j = -kernelCenter; j <= kernelCenter; j++)
-            {
-                Pixel currentPixel = image[(width + 2 * kernelCenter) * (y + kernelCenter + j) + x  + kernelCenter + i];
-                double currentKernelElement = kernel[(2 * kernelCenter + 1) * (j + kernelCenter) + i + kernelCenter];
-                r += currentPixel.r * currentKernelElement;
-                g += currentPixel.g * currentKernelElement;
-                b += currentPixel.b * currentKernelElement;
-            }
-        }
+            int xx = x + i;
+            int yy = y + j;
+            if (xx < 0)
+                xx = 0;
+            if (xx >= width)
+                xx = width - 1;
+            if (yy < 0)
+                yy = 0;
+            if (yy >= height)
+                yy = height - 1;
 
-        filtered[width * y + x].r = (unsigned char)round(r);
-        filtered[width * y + x].g = (unsigned char)round(g);
-        filtered[width * y + x].b = (unsigned char)round(b);
+            Pixel currentPixel = image[yy * width + xx];
+            double currentKernelElement = kernel[(2 * kernelCenter + 1) * (j + kernelCenter) + i + kernelCenter];
+            r += currentPixel.r * currentKernelElement;
+            g += currentPixel.g * currentKernelElement;
+            b += currentPixel.b * currentKernelElement;
+        }
     }
+
+    filtered[width * y + x].r = (unsigned char) round(r);
+    filtered[width * y + x].g = (unsigned char) round(g);
+    filtered[width * y + x].b = (unsigned char) round(b);
 }
 
-void Solver::solve(int filter, const std::string& inFilename, const std::string& outFilename)
+void Solver::solve(int filter, const std::string &inFilename, const std::string &outFilename)
 {
     Image image = Reader::read(inFilename);
     Image filtered{};
 
-    switch(filter)
+    switch (filter)
     {
         case Filters::GAUSSIAN:
             filtered = solveGaussian(image);
@@ -65,59 +98,59 @@ void Solver::solve(int filter, const std::string& inFilename, const std::string&
     Writer::write(filtered, outFilename);
 }
 
-Image Solver::solveGaussian(const Image& image)
+Image Solver::solveGaussian(const Image &image)
 {
     Pixel *dImage, *dFiltered, *filtered;
     double *dKernel;
 
     filtered = (Pixel *) malloc(image.width * image.height * sizeof(Pixel));
-    cudaMalloc(&dImage, image.width * image.height * sizeof(Pixel));
-    cudaMalloc(&dFiltered, image.width * image.height * sizeof(Pixel));
-    cudaMalloc(&dKernel, 25 * sizeof(double));
+    SAFE_CALL(cudaMalloc(&dImage, image.width * image.height * sizeof(Pixel)));
+    SAFE_CALL(cudaMalloc(&dFiltered, image.width * image.height * sizeof(Pixel)));
+    SAFE_CALL(cudaMalloc(&dKernel, 25 * sizeof(double)));
 
     cudaEvent_t start, stop, startCopy, stopCopy;
 
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventCreate(&startCopy);
-    cudaEventCreate(&stopCopy);
+    SAFE_CALL(cudaEventCreate(&start));
+    SAFE_CALL(cudaEventCreate(&stop));
+    SAFE_CALL(cudaEventCreate(&startCopy));
+    SAFE_CALL(cudaEventCreate(&stopCopy));
 
-    cudaEventRecord(startCopy);
+    SAFE_CALL(cudaEventRecord(startCopy));
 
-    cudaMemcpy(dImage, image.data, image.width * image.height, cudaMemcpyHostToDevice);
-    cudaMemcpy(dKernel, Filters::gaussianKernel, 25, cudaMemcpyHostToDevice);
+    SAFE_CALL(cudaMemcpy(dImage, image.data, image.width * image.height * sizeof(Pixel), cudaMemcpyHostToDevice));
+    SAFE_CALL(cudaMemcpy(dKernel, Filters::gaussianKernel, 25 * sizeof(double), cudaMemcpyHostToDevice));
 
-    cudaDeviceSynchronize();
+    SAFE_CALL(cudaDeviceSynchronize());
 
-    int blockDims = 32;
-    int blocksX = ceil(image.width * 1. / blockDims);
-    int blocksY = ceil(image.height * 1. / blockDims);
+    dim3 threads(32, 32);
+    dim3 blocks(image.width / threads.x + 1, image.height / threads.y + 1);
 
-    cudaEventRecord(start);
+    SAFE_CALL(cudaEventRecord(start));
 
-    applyFilter<<<blocksX, blocksY>>>(dImage, dFiltered, dKernel, 2, image.width, image.height);
-    cudaDeviceSynchronize();
+    SAFE_KERNEL_CALL((applyFilter<<<blocks, threads>>>(dImage, dFiltered, dKernel, 2, image.width, image.height)));
+    SAFE_CALL(cudaDeviceSynchronize());
 
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
+    SAFE_CALL(cudaEventRecord(stop));
+    SAFE_CALL(cudaEventSynchronize(stop));
 
-    cudaMemcpy(filtered, dFiltered, image.width * image.height, cudaMemcpyDeviceToHost);
-    cudaDeviceSynchronize();
+    SAFE_CALL(cudaMemcpy(filtered, dFiltered, image.width * image.height * sizeof(Pixel), cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaDeviceSynchronize());
 
-    cudaEventRecord(stopCopy);
-    cudaEventSynchronize(stopCopy);
+    SAFE_CALL(cudaEventRecord(stopCopy));
+    SAFE_CALL(cudaEventSynchronize(stopCopy));
 
     Image res(filtered, image.width, image.height, image.channels);
 
     free(filtered);
-    cudaFree(dImage);
-    cudaFree(dKernel);
-    cudaFree(dFiltered);
+    SAFE_CALL(cudaFree(dImage));
+    SAFE_CALL(cudaFree(dKernel));
+    SAFE_CALL(cudaFree(dFiltered));
 
     float tmp = 0.;
-    cudaEventElapsedTime(&tmp, startCopy, stopCopy);
+    SAFE_CALL(cudaEventElapsedTime(&tmp, startCopy, stopCopy));
+    cout << "Gaussian blur: " << endl;
     cout << "Time for " << image.height << "x" << image.width << " image with copying: " << tmp << endl;
-    cudaEventElapsedTime(&tmp, start, stop);
+    SAFE_CALL(cudaEventElapsedTime(&tmp, start, stop));
     cout << "Time for " << image.height << "x" << image.width << " image without copying: " << tmp << endl;
 
     return res;
@@ -129,53 +162,53 @@ Image Solver::solveEdge(Image image)
     double *dKernel;
 
     filtered = (Pixel *) malloc(image.width * image.height * sizeof(Pixel));
-    cudaMalloc(&dImage, image.width * image.height * sizeof(Pixel));
-    cudaMalloc(&dFiltered, image.width * image.height * sizeof(Pixel));
-    cudaMalloc(&dKernel, 9 * sizeof(double));
+    SAFE_CALL(cudaMalloc(&dImage, image.width * image.height * sizeof(Pixel)));
+    SAFE_CALL(cudaMalloc(&dFiltered, image.width * image.height * sizeof(Pixel)));
+    SAFE_CALL(cudaMalloc(&dKernel, 9 * sizeof(double)));
 
     cudaEvent_t start, stop, startCopy, stopCopy;
 
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventCreate(&startCopy);
-    cudaEventCreate(&stopCopy);
+    SAFE_CALL(cudaEventCreate(&start));
+    SAFE_CALL(cudaEventCreate(&stop));
+    SAFE_CALL(cudaEventCreate(&startCopy));
+    SAFE_CALL(cudaEventCreate(&stopCopy));
 
-    cudaEventRecord(startCopy);
+    SAFE_CALL(cudaEventRecord(startCopy));
 
-    cudaMemcpy(dImage, image.data, image.width * image.height, cudaMemcpyHostToDevice);
-    cudaMemcpy(dKernel, Filters::edgeKernel, 9, cudaMemcpyHostToDevice);
+    SAFE_CALL(cudaMemcpy(dImage, image.data, image.width * image.height * sizeof(Pixel), cudaMemcpyHostToDevice));
+    SAFE_CALL(cudaMemcpy(dKernel, Filters::edgeKernel, 9 * sizeof(double), cudaMemcpyHostToDevice));
 
-    cudaDeviceSynchronize();
+    SAFE_CALL(cudaDeviceSynchronize());
 
-    int blockDims = 32;
-    int blocksX = ceil(image.width * 1. / blockDims);
-    int blocksY = ceil(image.height * 1. / blockDims);
+    dim3 threads(32, 32);
+    dim3 blocks(image.width / threads.x + 1, image.height / threads.y + 1);
 
-    cudaEventRecord(start);
+    SAFE_CALL(cudaEventRecord(start));
 
-    applyFilter<<<blocksX, blocksY>>>(dImage, dFiltered, dKernel, 2, image.width, image.height);
-    cudaDeviceSynchronize();
+    SAFE_KERNEL_CALL((applyFilter<<<blocks, threads>>>(dImage, dFiltered, dKernel, 1, image.width, image.height)));
+    SAFE_CALL(cudaDeviceSynchronize());
 
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
+    SAFE_CALL(cudaEventRecord(stop));
+    SAFE_CALL(cudaEventSynchronize(stop));
 
-    cudaMemcpy(filtered, dFiltered, image.width * image.height, cudaMemcpyDeviceToHost);
-    cudaDeviceSynchronize();
+    SAFE_CALL(cudaMemcpy(filtered, dFiltered, image.width * image.height * sizeof(Pixel), cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaDeviceSynchronize());
 
-    cudaEventRecord(stopCopy);
-    cudaEventSynchronize(stopCopy);
+    SAFE_CALL(cudaEventRecord(stopCopy));
+    SAFE_CALL(cudaEventSynchronize(stopCopy));
 
     Image res(filtered, image.width, image.height, image.channels);
 
     free(filtered);
-    cudaFree(dImage);
-    cudaFree(dKernel);
-    cudaFree(dFiltered);
+    SAFE_CALL(cudaFree(dImage));
+    SAFE_CALL(cudaFree(dKernel));
+    SAFE_CALL(cudaFree(dFiltered));
 
     float tmp = 0.;
-    cudaEventElapsedTime(&tmp, startCopy, stopCopy);
+    SAFE_CALL(cudaEventElapsedTime(&tmp, startCopy, stopCopy));
+    cout << "Edge detection: " << endl;
     cout << "Time for " << image.height << "x" << image.width << " image with copying: " << tmp << endl;
-    cudaEventElapsedTime(&tmp, start, stop);
+    SAFE_CALL(cudaEventElapsedTime(&tmp, start, stop));
     cout << "Time for " << image.height << "x" << image.width << " image without copying: " << tmp << endl;
 
     return res;
@@ -187,53 +220,52 @@ Image Solver::solveSharpen(Image image)
     double *dKernel;
 
     filtered = (Pixel *) malloc(image.width * image.height * sizeof(Pixel));
-    cudaMalloc(&dImage, image.width * image.height * sizeof(Pixel));
-    cudaMalloc(&dFiltered, image.width * image.height * sizeof(Pixel));
-    cudaMalloc(&dKernel, 9 * sizeof(double));
+    SAFE_CALL(cudaMalloc(&dImage, image.width * image.height * sizeof(Pixel)));
+    SAFE_CALL(cudaMalloc(&dFiltered, image.width * image.height * sizeof(Pixel)));
+    SAFE_CALL(cudaMalloc(&dKernel, 9 * sizeof(double)));
 
     cudaEvent_t start, stop, startCopy, stopCopy;
 
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventCreate(&startCopy);
-    cudaEventCreate(&stopCopy);
+    SAFE_CALL(cudaEventCreate(&start));
+    SAFE_CALL(cudaEventCreate(&stop));
+    SAFE_CALL(cudaEventCreate(&startCopy));
+    SAFE_CALL(cudaEventCreate(&stopCopy));
 
-    cudaEventRecord(startCopy);
+    SAFE_CALL(cudaEventRecord(startCopy));
 
-    cudaMemcpy(dImage, image.data, image.width * image.height, cudaMemcpyHostToDevice);
-    cudaMemcpy(dKernel, Filters::sharpenKernel, 9, cudaMemcpyHostToDevice);
+    SAFE_CALL(cudaMemcpy(dImage, image.data, image.width * image.height * sizeof(Pixel), cudaMemcpyHostToDevice));
+    SAFE_CALL(cudaMemcpy(dKernel, Filters::sharpenKernel, 9 * sizeof(double), cudaMemcpyHostToDevice));
 
-    cudaDeviceSynchronize();
+    SAFE_CALL(cudaDeviceSynchronize());
 
-    int blockDims = 32;
-    int blocksX = ceil(image.width * 1. / blockDims);
-    int blocksY = ceil(image.height * 1. / blockDims);
+    dim3 threads(32, 32);
+    dim3 blocks(image.width / threads.x + 1, image.height / threads.y + 1);
+    SAFE_CALL(cudaEventRecord(start));
 
-    cudaEventRecord(start);
+    SAFE_KERNEL_CALL((applyFilter<<<blocks, threads>>>(dImage, dFiltered, dKernel, 1, image.width, image.height)));
+    SAFE_CALL(cudaDeviceSynchronize());
 
-    applyFilter<<<blocksX, blocksY>>>(dImage, dFiltered, dKernel, 2, image.width, image.height);
-    cudaDeviceSynchronize();
+    SAFE_CALL(cudaEventRecord(stop));
+    SAFE_CALL(cudaEventSynchronize(stop));
 
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
+    SAFE_CALL(cudaMemcpy(filtered, dFiltered, image.width * image.height * sizeof(Pixel), cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaDeviceSynchronize());
 
-    cudaMemcpy(filtered, dFiltered, image.width * image.height, cudaMemcpyDeviceToHost);
-    cudaDeviceSynchronize();
-
-    cudaEventRecord(stopCopy);
-    cudaEventSynchronize(stopCopy);
+    SAFE_CALL(cudaEventRecord(stopCopy));
+    SAFE_CALL(cudaEventSynchronize(stopCopy));
 
     Image res(filtered, image.width, image.height, image.channels);
 
     free(filtered);
-    cudaFree(dImage);
-    cudaFree(dKernel);
-    cudaFree(dFiltered);
+    SAFE_CALL(cudaFree(dImage));
+    SAFE_CALL(cudaFree(dKernel));
+    SAFE_CALL(cudaFree(dFiltered));
 
     float tmp = 0.;
-    cudaEventElapsedTime(&tmp, startCopy, stopCopy);
+    SAFE_CALL(cudaEventElapsedTime(&tmp, startCopy, stopCopy));
+    cout << "Sharpen: " << endl;
     cout << "Time for " << image.height << "x" << image.width << " image with copying: " << tmp << endl;
-    cudaEventElapsedTime(&tmp, start, stop);
+    SAFE_CALL(cudaEventElapsedTime(&tmp, start, stop));
     cout << "Time for " << image.height << "x" << image.width << " image without copying: " << tmp << endl;
 
     return res;

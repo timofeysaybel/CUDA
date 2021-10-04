@@ -1,9 +1,11 @@
 //
-// Created by timofey on 02.10.2021.
+// Created by timofey
 //
 
 #ifndef IMAGECONVOLUTION_IMAGE_H
 #define IMAGECONVOLUTION_IMAGE_H
+
+#include <cuda.h>
 
 struct Pixel
 {
@@ -20,8 +22,6 @@ public:
     int width, height, channels;
 
     Image() = default;
-
-    ~Image();
 
     Image(unsigned char* d, int w, int h, int c);
 

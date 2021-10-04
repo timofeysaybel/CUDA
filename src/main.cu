@@ -1,5 +1,5 @@
 //
-// Created by timofey on 03.10.2021.
+// Created by timofey
 //
 #include <iostream>
 
@@ -11,6 +11,7 @@ using namespace std;
 
 const string imageDir = "images/";
 const string resultDir = "res/";
+const string FORMAT = ".jpg";
 const string RED = "\u001B[31m";
 const string RESET = "\u001B[0m";
 
@@ -22,7 +23,7 @@ int main(int argc, char **argv)
         Args args = Args::parseArgs(argc, argv);
 
         for (auto &filename: args.filenames)
-            Solver::solve(args.filter, imageDir + filename, resultDir + filename);
+            Solver::solve(args.filter, imageDir + filename + FORMAT, resultDir + filename + argv[1] + FORMAT);
     }
     catch (InputException &e)
     {
