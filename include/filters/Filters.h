@@ -10,6 +10,7 @@ namespace Filters
     const int GAUSSIAN = 0;
     const int EDGE_DETECTION = 1;
     const int SHARPEN = 2;
+    const int ALL = 3;
 
     const double gaussianKernel[] =
             {

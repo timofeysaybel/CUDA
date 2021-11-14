@@ -25,12 +25,17 @@ public:
 
     Image(unsigned char* d, int w, int h, int c);
 
+    Image(unsigned char* d, int w, int h);
+
     Image(const unsigned char* &d,const int& w,const int& h,const int& c);
 
     Image(Pixel* d, int w, int h, int c);
 
     Image(const Image& an);
 
+    unsigned char* getData() const;
+
+    unsigned char* getData(int pos) const;
 };
 
 
