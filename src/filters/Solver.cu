@@ -8,6 +8,7 @@
 #include "../../include/io/Writer.h"
 
 #include <iostream>
+#include <cmath>
 
 #define SAFE_CALL(CallInstruction) { \
     cudaError_t cuerr = CallInstruction; \
@@ -34,6 +35,10 @@
 #define FRACTION_CEILING(numerator, denominator) ((numerator+denominator-1)/denominator)
 
 const int BLOCK_SIZE = 16;
+const int BLOCK3 = 14;
+const int BLOCK5 = 12;
+
+const int FILES_N = 100;
 
 using namespace std;
 
@@ -594,15 +599,18 @@ namespace opt2
     {
         __shared__ unsigned buf[BLOCK_SIZE * BLOCK_SIZE * 3];
 
-        int x = blockDim.x * blockIdx.x + threadIdx.x;
-        int y = blockDim.y * blockIdx.y + threadIdx.y;
+        int x = (blockDim.x - 2 * kernelCenter) * blockIdx.x + threadIdx.x - 2 * kernelCenter;
+        int y = (blockDim.y - 2 * kernelCenter) * blockIdx.y + threadIdx.y - 2 * kernelCenter;
+
+        if (x < 0 || y < 0 || x >= width || y >= height)
+            return;
 
         int idx = y * width + x + threadIdx.z * width * height;
         buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x] = image[idx];
         __syncthreads();
 
-        if (threadIdx.x <= 1 || threadIdx.y <= 1 || threadIdx.x >= blockDim.x - 2 || threadIdx.y >= blockDim.y - 2 ||
-            x > width + 1 || y > height + 1)
+        if (threadIdx.x <= kernelCenter - 1 || threadIdx.y <= kernelCenter - 1 ||
+            threadIdx.x >= blockDim.x - kernelCenter || threadIdx.y >= blockDim.y - kernelCenter)
             return;
 
         double c = 0.;
@@ -612,7 +620,8 @@ namespace opt2
             for (int j = -kernelCenter; j <= kernelCenter; j++)
             {
                 double currentKernelElement = kernel[(2 * kernelCenter + 1) * (j + kernelCenter) + i + kernelCenter];
-                c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + i) + threadIdx.x + j] * currentKernelElement;
+                c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + i) * blockDim.x + threadIdx.x + j] *
+                     currentKernelElement;
             }
         }
 
@@ -647,7 +656,7 @@ Image Opt2::Solver::solveGaussian(const Image &image)
 
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE, 3);
 
-    dim3 blocks(FRACTION_CEILING(image.width , BLOCK_SIZE), FRACTION_CEILING(image.height, BLOCK_SIZE), 1);
+    dim3 blocks(FRACTION_CEILING(image.width , BLOCK5), FRACTION_CEILING(image.height, BLOCK5), 1);
 
     SAFE_CALL(cudaEventRecord(start));
 
@@ -708,7 +717,7 @@ Image Opt2::Solver::solveEdge(Image image)
 
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE, 3);
 
-    dim3 blocks(FRACTION_CEILING(image.width * 3, BLOCK_SIZE), FRACTION_CEILING(image.height, BLOCK_SIZE), 1);
+    dim3 blocks(FRACTION_CEILING(image.width, BLOCK3), FRACTION_CEILING(image.height, BLOCK3), 1);
 
     SAFE_CALL(cudaEventRecord(start));
 
@@ -769,7 +778,7 @@ Image Opt2::Solver::solveSharpen(Image image)
 
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE, 3);
 
-    dim3 blocks(FRACTION_CEILING(image.width * 3, BLOCK_SIZE), FRACTION_CEILING(image.height, BLOCK_SIZE), 1);
+    dim3 blocks(FRACTION_CEILING(image.width, BLOCK3), FRACTION_CEILING(image.height, BLOCK3), 1);
 
     SAFE_CALL(cudaEventRecord(start));
 
@@ -846,73 +855,108 @@ void Opt4::Solver::solve(int filter, const std::string &inFilename, const std::s
     }
 }
 
+namespace opt4
+{
+    __device__
+    const double gaussianKernel[] =
+            {
+                    1 / 273., 4 / 273., 7 / 273., 4 / 273., 1 / 273.,
+                    4 / 273., 16 / 273., 26 / 273., 16 / 273., 4 / 273.,
+                    7 / 273., 26 / 273., 41 / 273., 26 / 273., 7 / 273.,
+                    4 / 273., 16 / 273., 26 / 273., 16 / 273., 4 / 273.,
+                    1 / 273., 4 / 273., 7 / 273., 4 / 273., 1 / 273.,
+            };
+
+    __device__
+    const double edgeKernel[] =
+            {
+                    0, -1, 0,
+                    -1, 4, -1,
+                    0, -1, 0,
+            };
+
+    __device__
+    const double sharpenKernel[] =
+            {
+                    -1, -1, -1,
+                    -1, 9, -1,
+                    -1, -1, -1
+            };
+}
+
 __global__
 void gaussianFilter(unsigned char *image, unsigned char *filtered, int width, int height)
 {
     __shared__ unsigned buf[BLOCK_SIZE * BLOCK_SIZE * 3];
 
-    int x = blockDim.x * blockIdx.x + threadIdx.x;
-    int y = blockDim.y * blockIdx.y + threadIdx.y;
+    int x = (blockDim.x - 4) * blockIdx.x + threadIdx.x - 4;
+    int y = (blockDim.y - 4) * blockIdx.y + threadIdx.y - 4;
+
+    if (x < 0 || y < 0 || x >= width || y >= height)
+        return;
 
     int idx = y * width + x + threadIdx.z * width * height;
     buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x] = image[idx];
     __syncthreads();
 
-    if (threadIdx.x <= 1 || threadIdx.y <= 1 || threadIdx.x >= blockDim.x - 2 || threadIdx.y >= blockDim.y - 2 ||
-        x > width + 1 || y > height + 1)
+    if (threadIdx.x <= 1 || threadIdx.y <= 1 ||
+        threadIdx.x >= blockDim.x - 2 || threadIdx.y >= blockDim.y - 2)
         return;
 
     double c = 0.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 2) + threadIdx.x - 2] *
-            1 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 1) + threadIdx.x - 2] *
-            4 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x) + threadIdx.x - 2] *
-            7 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 1) + threadIdx.x - 2] *
-            4 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 2) + threadIdx.x - 2] *
-            1 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 2) + threadIdx.x - 1] *
-            4 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 1) + threadIdx.x - 1] *
-            16 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x) + threadIdx.x - 1] *
-            26 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 1) + threadIdx.x - 1] *
-            16 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 2) + threadIdx.x - 1] *
-            4 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 2) + threadIdx.x] *
-            7 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 1) + threadIdx.x] *
-            26 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x) + threadIdx.x] *
-            41 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 1) + threadIdx.x] *
-            26 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 2) + threadIdx.x] *
-            7 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 2) + threadIdx.x + 1] *
-            4 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 1) + threadIdx.x + 1] *
-            16 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x) + threadIdx.x + 1] *
-            26 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 1) + threadIdx.x + 1] *
-            16 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 2) + threadIdx.x + 1] *
-            4 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 2) + threadIdx.x + 2] *
-            1 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 1) + threadIdx.x + 2] *
-            4 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x) + threadIdx.x + 2] *
-            7 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 1) + threadIdx.x + 2] *
-            4 / 273.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 2) + threadIdx.x + 2] *
-            1 / 273.;
+
+    using opt4::gaussianKernel;
+
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 2) * blockDim.x + threadIdx.x - 2] *
+            gaussianKernel[0];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 1) * blockDim.x + threadIdx.x - 2] *
+            gaussianKernel[1];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x - 2] *
+            gaussianKernel[2];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 1) * blockDim.x + threadIdx.x - 2] *
+            gaussianKernel[3];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 2) * blockDim.x + threadIdx.x - 2] *
+            gaussianKernel[4];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 2) * blockDim.x + threadIdx.x - 1] *
+            gaussianKernel[5];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 1) * blockDim.x + threadIdx.x - 1] *
+            gaussianKernel[6];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x - 1] *
+            gaussianKernel[7];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 1) * blockDim.x + threadIdx.x - 1] *
+            gaussianKernel[8];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 2) * blockDim.x + threadIdx.x - 1] *
+            gaussianKernel[9];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 2) * blockDim.x + threadIdx.x] *
+            gaussianKernel[10];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 1) * blockDim.x + threadIdx.x] *
+            gaussianKernel[11];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x] *
+            gaussianKernel[12];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 1) * blockDim.x + threadIdx.x] *
+            gaussianKernel[13];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 2) * blockDim.x + threadIdx.x] *
+            gaussianKernel[14];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 2) * blockDim.x + threadIdx.x + 1] *
+            gaussianKernel[15];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 1) * blockDim.x + threadIdx.x + 1] *
+            gaussianKernel[16];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x + 1] *
+            gaussianKernel[17];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 1) * blockDim.x + threadIdx.x + 1] *
+            gaussianKernel[18];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 2) * blockDim.x + threadIdx.x + 1] *
+            gaussianKernel[19];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 2) * blockDim.x + threadIdx.x + 2] *
+            gaussianKernel[20];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 1) * blockDim.x + threadIdx.x + 2] *
+            gaussianKernel[21];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x + 2] *
+            gaussianKernel[22];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 1) * blockDim.x + threadIdx.x + 2] *
+            gaussianKernel[23];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 2) * blockDim.x + threadIdx.x + 2] *
+            gaussianKernel[24];
 
     filtered[threadIdx.z * width * height + width * y + x] = (unsigned char) round(c);
 }
@@ -922,28 +966,32 @@ void edgeFilter(unsigned char *image, unsigned char *filtered, int width, int he
 {
     __shared__ unsigned buf[BLOCK_SIZE * BLOCK_SIZE * 3];
 
-    int x = blockDim.x * blockIdx.x + threadIdx.x;
-    int y = blockDim.y * blockIdx.y + threadIdx.y;
+    int x = (blockDim.x - 2) * blockIdx.x + threadIdx.x - 2;
+    int y = (blockDim.y - 2) * blockIdx.y + threadIdx.y - 2;
+
+    if (x < 0 || y < 0 || x >= width || y >= height)
+        return;
 
     int idx = y * width + x + threadIdx.z * width * height;
     buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x] = image[idx];
     __syncthreads();
 
-    if (threadIdx.x == 0 || threadIdx.y == 0 || threadIdx.x == blockDim.x - 1 || threadIdx.y == blockDim.y - 1 ||
-        x > width || y > height)
+    if (threadIdx.x <= 0 || threadIdx.y <= 0 ||
+        threadIdx.x >= blockDim.x - 1 || threadIdx.y >= blockDim.y - 1)
         return;
 
     double c = 0.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x) + threadIdx.x - 1] *
-         -1.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 1) + threadIdx.x] *
-         -1.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x) + threadIdx.x] *
-         4.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 1) + threadIdx.x] *
-         -1.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x) + threadIdx.x + 1] *
-         -1.;
+    using opt4::edgeKernel;
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x - 1] *
+         edgeKernel[1];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 1) * blockDim.x + threadIdx.x] *
+            edgeKernel[3];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x] *
+            edgeKernel[4];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 1) * blockDim.x + threadIdx.x] *
+            edgeKernel[5];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x + 1] *
+            edgeKernel[7];
 
     filtered[threadIdx.z * width * height + width * y + x] = (unsigned char) round(c);
 }
@@ -953,36 +1001,40 @@ void sharpenFilter(unsigned char *image, unsigned char *filtered, int width, int
 {
     __shared__ unsigned buf[BLOCK_SIZE * BLOCK_SIZE * 3];
 
-    int x = blockDim.x * blockIdx.x + threadIdx.x;
-    int y = blockDim.y * blockIdx.y + threadIdx.y;
+    int x = (blockDim.x - 2) * blockIdx.x + threadIdx.x - 2;
+    int y = (blockDim.y - 2) * blockIdx.y + threadIdx.y - 2;
+
+    if (x < 0 || y < 0 || x >= width || y >= height)
+        return;
 
     int idx = y * width + x + threadIdx.z * width * height;
     buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x] = image[idx];
     __syncthreads();
 
-    if (threadIdx.x == 0 || threadIdx.y == 0 || threadIdx.x == blockDim.x - 1 || threadIdx.y == blockDim.y - 1 ||
-        x > width || y > height)
+    if (threadIdx.x <= 0 || threadIdx.y <= 0 ||
+        threadIdx.x >= blockDim.x - 1 || threadIdx.y >= blockDim.y - 1)
         return;
 
     double c = 0.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 1) + threadIdx.x - 1] *
-         -1.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x) + threadIdx.x - 1] *
-         -1.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 1) + threadIdx.x - 1] *
-         -1.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 1) + threadIdx.x] *
-         -1.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x) + threadIdx.x] *
-         9.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 1) + threadIdx.x] *
-         -1.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x - 1) + threadIdx.x + 1] *
-         -1.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x) + threadIdx.x + 1] *
-         -1.;
-    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * (blockDim.x + 1) + threadIdx.x + 1] *
-         -1.;
+    using opt4::sharpenKernel;
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 1) * blockDim.x + threadIdx.x - 1] *
+         sharpenKernel[0];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x - 1] *
+            sharpenKernel[1];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 1) * blockDim.x + threadIdx.x - 1] *
+            sharpenKernel[2];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 1) * blockDim.x + threadIdx.x] *
+            sharpenKernel[3];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x] *
+            sharpenKernel[4];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 1) * blockDim.x + threadIdx.x] *
+            sharpenKernel[5];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y - 1) * blockDim.x + threadIdx.x + 1] *
+            sharpenKernel[6];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + threadIdx.y * blockDim.x + threadIdx.x + 1] *
+            sharpenKernel[7];
+    c += buf[threadIdx.z * BLOCK_SIZE * BLOCK_SIZE + (threadIdx.y + 1) * blockDim.x + threadIdx.x + 1] *
+            sharpenKernel[8];
 
     filtered[threadIdx.z * width * height + width * y + x] = (unsigned char) round(c);
 }
@@ -1011,7 +1063,7 @@ Image Opt4::Solver::solveGaussian(const Image &image)
 
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE, 3);
 
-    dim3 blocks(FRACTION_CEILING(image.width * 3, BLOCK_SIZE), FRACTION_CEILING(image.height, BLOCK_SIZE), 1);
+    dim3 blocks(FRACTION_CEILING(image.width, BLOCK5), FRACTION_CEILING(image.height, BLOCK5), 1);
 
     SAFE_CALL(cudaEventRecord(start));
 
@@ -1068,7 +1120,7 @@ Image Opt4::Solver::solveEdge(Image image)
 
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE, 3);
 
-    dim3 blocks(FRACTION_CEILING(image.width * 3, BLOCK_SIZE), FRACTION_CEILING(image.height, BLOCK_SIZE), 1);
+    dim3 blocks(FRACTION_CEILING(image.width, BLOCK3), FRACTION_CEILING(image.height, BLOCK3), 1);
 
     SAFE_CALL(cudaEventRecord(start));
 
@@ -1125,7 +1177,7 @@ Image Opt4::Solver::solveSharpen(Image image)
 
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE, 3);
 
-    dim3 blocks(FRACTION_CEILING(image.width * 3, BLOCK_SIZE), FRACTION_CEILING(image.height, BLOCK_SIZE), 1);
+    dim3 blocks(FRACTION_CEILING(image.width, BLOCK3), FRACTION_CEILING(image.height, BLOCK3), 1);
 
     SAFE_CALL(cudaEventRecord(start));
 
@@ -1156,4 +1208,252 @@ Image Opt4::Solver::solveSharpen(Image image)
     cout << "Time for " << image.height << "x" << image.width << " image without copying: " << tmp << endl;
 
     return res;
+}
+
+//--------------------------------------5) ОПТИМИЗАЦИЯ МАЛЕНЬКИХ ИЗОБРАЖЕНИЙ--------------------------------------------
+
+void Opt5::Solver::solve(const std::vector<std::string> &inFilenames, std::vector<std::string> &outFilenames)
+{
+    const string FORMAT = ".jpg";
+    int startFileIdx = 0;
+    int amountOfFiles = inFilenames.size();
+    int filesOffset = min(FILES_N, amountOfFiles);
+    while (amountOfFiles > 0)
+    {
+        vector<Image> images;
+        for (int i = startFileIdx; i < filesOffset; i++)
+            images.emplace_back(Reader::read(inFilenames[i]));
+
+        amountOfFiles-=filesOffset - startFileIdx;
+
+        vector<Image> filtered;
+
+        filtered = solveGaussian(images);
+        for (int i = startFileIdx; i < filesOffset; i++)
+            Writer::write(filtered[i], outFilenames[i] + "gaussian" + FORMAT);
+
+        filtered = solveEdge(images);
+        for (int i = startFileIdx; i < filesOffset; i++)
+            Writer::write(filtered[i], outFilenames[i] + "gaussian" + FORMAT);
+
+        filtered = solveSharpen(images);
+        for (int i = startFileIdx; i < filesOffset; i++)
+            Writer::write(filtered[i], outFilenames[i] + "gaussian" + FORMAT);
+
+        startFileIdx = filesOffset;
+        filesOffset += min(FILES_N, amountOfFiles);
+    }
+}
+
+vector<Image> Opt5::Solver::solveGaussian(const std::vector<Image> &image)
+{
+    unsigned char *dImage, *dFiltered, *filtered;
+    int height = image[0].height, width = image[0].width;
+    filtered = (unsigned char *) malloc(image.size() * width * height * 3 * sizeof(unsigned char));
+    SAFE_CALL(cudaMalloc(&dImage, image.size() * width * height * 3 * sizeof(unsigned char)));
+    SAFE_CALL(cudaMalloc(&dFiltered, image.size() * width * height * 3 * sizeof(unsigned char)));
+
+    cudaEvent_t start, stop, startCopy, stopCopy;
+    unsigned char* img;
+    img = (unsigned char *) malloc(image.size() * width * height * 3 * sizeof(unsigned char));
+    for (int i = 0; i < image.size(); i++)
+    {
+        unsigned char *tmpImg = image[i].getData();
+        for (int j = 0; j < image[i].width * image[i].height * 3; i++)
+            img[i * image[i].width * image[i].height * 3 + j] = tmpImg[j];
+    }
+
+    SAFE_CALL(cudaEventCreate(&start));
+    SAFE_CALL(cudaEventCreate(&stop));
+    SAFE_CALL(cudaEventCreate(&startCopy));
+    SAFE_CALL(cudaEventCreate(&stopCopy));
+
+    SAFE_CALL(cudaEventRecord(startCopy));
+
+    SAFE_CALL(cudaMemcpy(dImage, img, image.size() * width * height * 3 * sizeof(unsigned char), cudaMemcpyHostToDevice));
+
+    SAFE_CALL(cudaDeviceSynchronize());
+
+    dim3 threads(BLOCK_SIZE, BLOCK_SIZE, 3);
+
+    dim3 blocks(FRACTION_CEILING(width * image.size(), BLOCK5), FRACTION_CEILING(height, BLOCK5), 1);
+
+    SAFE_CALL(cudaEventRecord(start));
+
+    SAFE_KERNEL_CALL((gaussianFilter<<<blocks, threads>>>(dImage, dFiltered, width, height)));
+    SAFE_CALL(cudaDeviceSynchronize());
+
+    SAFE_CALL(cudaEventRecord(stop));
+    SAFE_CALL(cudaEventSynchronize(stop));
+
+    SAFE_CALL(cudaMemcpy(filtered, dFiltered, image.size() * width * height * 3 * sizeof(unsigned char),
+                         cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaDeviceSynchronize());
+
+    SAFE_CALL(cudaEventRecord(stopCopy));
+    SAFE_CALL(cudaEventSynchronize(stopCopy));
+
+    vector<Image> result;
+    for (int i = 0; i < image.size(); i++)
+    {
+        unsigned char* tmpFiltered = (unsigned char*)malloc(image[i].height * image[i].width * 3 * sizeof(unsigned char));
+        for (int j = 0; j < image[i].height * image[i].width * 3; j++)
+            tmpFiltered[j] = filtered[i * image[i].height * image[i].width * 3 + j];
+        result.emplace_back(tmpFiltered, image[i].width, image[i].height, image[i].channels);
+    }
+
+    free(filtered);
+    SAFE_CALL(cudaFree(dImage));
+    SAFE_CALL(cudaFree(dFiltered));
+
+    float tmp = 0.;
+    SAFE_CALL(cudaEventElapsedTime(&tmp, startCopy, stopCopy));
+    cout << "Gaussian blur: " << endl;
+    cout << "Time for " << image.size() << " 300x300 image with copying: " << tmp << endl;
+    SAFE_CALL(cudaEventElapsedTime(&tmp, start, stop));
+    cout << "Time for " << image.size() << " 300x300 image without copying: " << tmp << endl;
+
+    return result;
+}
+
+vector<Image> Opt5::Solver::solveEdge(std::vector<Image> image)
+{
+    unsigned char *dImage, *dFiltered, *filtered;
+    int height = image[0].height, width = image[0].width;
+    filtered = (unsigned char *) malloc(image.size() * width * height * 3 * sizeof(unsigned char));
+    SAFE_CALL(cudaMalloc(&dImage, image.size() * width * height * 3 * sizeof(unsigned char)));
+    SAFE_CALL(cudaMalloc(&dFiltered, image.size() * width * height * 3 * sizeof(unsigned char)));
+
+    cudaEvent_t start, stop, startCopy, stopCopy;
+    unsigned char* img;
+    img = (unsigned char *) malloc(image.size() * width * height * 3 * sizeof(unsigned char));
+    for (int i = 0; i < image.size(); i++)
+    {
+        unsigned char *tmpImg = image[i].getData();
+        for (int j = 0; j < image[i].width * image[i].height * 3; i++)
+            img[i * image[i].width * image[i].height * 3 + j] = tmpImg[j];
+    }
+
+    SAFE_CALL(cudaEventCreate(&start));
+    SAFE_CALL(cudaEventCreate(&stop));
+    SAFE_CALL(cudaEventCreate(&startCopy));
+    SAFE_CALL(cudaEventCreate(&stopCopy));
+
+    SAFE_CALL(cudaEventRecord(startCopy));
+
+    SAFE_CALL(cudaMemcpy(dImage, img, image.size() * width * height * 3 * sizeof(unsigned char), cudaMemcpyHostToDevice));
+
+    SAFE_CALL(cudaDeviceSynchronize());
+
+    dim3 threads(BLOCK_SIZE, BLOCK_SIZE, 3);
+
+    dim3 blocks(FRACTION_CEILING(width * image.size(), BLOCK3), FRACTION_CEILING(height, BLOCK3), 1);
+
+    SAFE_CALL(cudaEventRecord(start));
+
+    SAFE_KERNEL_CALL((edgeFilter<<<blocks, threads>>>(dImage, dFiltered, width * image.size(), height)));
+    SAFE_CALL(cudaDeviceSynchronize());
+
+    SAFE_CALL(cudaEventRecord(stop));
+    SAFE_CALL(cudaEventSynchronize(stop));
+
+    SAFE_CALL(cudaMemcpy(filtered, dFiltered, image.size() * width * height * 3 * sizeof(unsigned char),
+                         cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaDeviceSynchronize());
+
+    SAFE_CALL(cudaEventRecord(stopCopy));
+    SAFE_CALL(cudaEventSynchronize(stopCopy));
+
+    vector<Image> result;
+    for (int i = 0; i < image.size(); i++)
+    {
+        unsigned char* tmpFiltered = (unsigned char*)malloc(image[i].height * image[i].width * 3 * sizeof(unsigned char));
+        for (int j = 0; j < image[i].height * image[i].width * 3; j++)
+            tmpFiltered[j] = filtered[i * image[i].height * image[i].width * 3 + j];
+        result.emplace_back(tmpFiltered, image[i].width, image[i].height, image[i].channels);
+    }
+
+    free(filtered);
+    SAFE_CALL(cudaFree(dImage));
+    SAFE_CALL(cudaFree(dFiltered));
+
+    float tmp = 0.;
+    SAFE_CALL(cudaEventElapsedTime(&tmp, startCopy, stopCopy));
+    cout << "Edge detection: " << endl;
+    cout << "Time for " << image.size() << " 300x300 image with copying: " << tmp << endl;
+    SAFE_CALL(cudaEventElapsedTime(&tmp, start, stop));
+    cout << "Time for " << image.size() << " 300x300 image without copying: " << tmp << endl;
+
+    return result;
+}
+
+vector<Image> Opt5::Solver::solveSharpen(std::vector<Image> image)
+{
+    unsigned char *dImage, *dFiltered, *filtered;
+    int height = image[0].height, width = image[0].width;
+    filtered = (unsigned char *) malloc(image.size() * width * height * 3 * sizeof(unsigned char));
+    SAFE_CALL(cudaMalloc(&dImage, image.size() * width * height * 3 * sizeof(unsigned char)));
+    SAFE_CALL(cudaMalloc(&dFiltered, image.size() * width * height * 3 * sizeof(unsigned char)));
+
+    cudaEvent_t start, stop, startCopy, stopCopy;
+    unsigned char* img;
+    img = (unsigned char *) malloc(image.size() * width * height * 3 * sizeof(unsigned char));
+    for (int i = 0; i < image.size(); i++)
+    {
+        unsigned char *tmpImg = image[i].getData();
+        for (int j = 0; j < image[i].width * image[i].height * 3; i++)
+            img[i * image[i].width * image[i].height * 3 + j] = tmpImg[j];
+    }
+
+    SAFE_CALL(cudaEventCreate(&start));
+    SAFE_CALL(cudaEventCreate(&stop));
+    SAFE_CALL(cudaEventCreate(&startCopy));
+    SAFE_CALL(cudaEventCreate(&stopCopy));
+
+    SAFE_CALL(cudaEventRecord(startCopy));
+
+    SAFE_CALL(cudaMemcpy(dImage, img, image.size() * width * height * 3 * sizeof(unsigned char), cudaMemcpyHostToDevice));
+
+    SAFE_CALL(cudaDeviceSynchronize());
+
+    dim3 threads(BLOCK_SIZE, BLOCK_SIZE, 3);
+
+    dim3 blocks(FRACTION_CEILING(width * image.size(), BLOCK3), FRACTION_CEILING(height, BLOCK3), 1);
+
+    SAFE_CALL(cudaEventRecord(start));
+
+    SAFE_KERNEL_CALL((sharpenFilter<<<blocks, threads>>>(dImage, dFiltered, width * image.size(), height)));
+    SAFE_CALL(cudaDeviceSynchronize());
+
+    SAFE_CALL(cudaEventRecord(stop));
+    SAFE_CALL(cudaEventSynchronize(stop));
+
+    SAFE_CALL(cudaMemcpy(filtered, dFiltered, image.size() * width * height * 3 * sizeof(unsigned char),
+                         cudaMemcpyDeviceToHost));
+    SAFE_CALL(cudaDeviceSynchronize());
+
+    SAFE_CALL(cudaEventRecord(stopCopy));
+    SAFE_CALL(cudaEventSynchronize(stopCopy));
+
+    vector<Image> result;
+    for (int i = 0; i < image.size(); i++)
+    {
+        unsigned char* tmpFiltered = (unsigned char*)malloc(image[i].height * image[i].width * 3 * sizeof(unsigned char));
+        for (int j = 0; j < image[i].height * image[i].width * 3; j++)
+            tmpFiltered[j] = filtered[i * image[i].height * image[i].width * 3 + j];
+        result.emplace_back(tmpFiltered, image[i].width, image[i].height, image[i].channels);
+    }
+
+    free(filtered);
+    SAFE_CALL(cudaFree(dImage));
+    SAFE_CALL(cudaFree(dFiltered));
+
+    float tmp = 0.;
+    SAFE_CALL(cudaEventElapsedTime(&tmp, startCopy, stopCopy));
+    cout << "Sharpen: " << endl;
+    cout << "Time for " << image.size() << " 300x300 image with copying: " << tmp << endl;
+    SAFE_CALL(cudaEventElapsedTime(&tmp, start, stop));
+    cout << "Time for " << image.size() << " 300x300 image without copying: " << tmp << endl;
+
+    return result;
 }
